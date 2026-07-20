@@ -6,6 +6,7 @@ on:
       - agent/import-accounting
     paths:
       - migration/accounting-source.ref
+      - .github/workflows/import-accounting.yml
   workflow_dispatch:
 
 permissions:
@@ -51,6 +52,7 @@ jobs:
           rsync -a --delete \
             --exclude='build/' \
             --exclude='dist/' \
+            --exclude='*.zip' \
             --exclude='.venv/' \
             --exclude='venv/' \
             --exclude='__pycache__/' \
@@ -79,7 +81,7 @@ jobs:
 
           - Source revision: \`${{ steps.source-ref.outputs.ref }}\`
           - Destination directory: \`accounting/\`
-          - Excluded: runtime databases, environment files, caches, logs, backups, and build artifacts.
+          - Excluded: runtime databases, environment files, caches, logs, backups, archives, and build artifacts.
 
           Future changes should be made in this repository. Re-running the import intentionally replaces \`accounting/\` from the pinned source revision.
           EOF
@@ -99,25 +101,53 @@ jobs:
           if find accounting -type f \( \
               -name '*.db' -o -name '*.db-*' -o \
               -name '*.sqlite' -o -name '*.sqlite3' -o \
-              -name '.env' -o -name '*.pyc' \
+              -name '*.zip' -o -name '.env' -o -name '*.pyc' \
             \) -print -quit | grep -q .; then
-            echo 'Forbidden runtime file found in accounting import.' >&2
+            echo 'Forbidden runtime or generated file found in accounting import.' >&2
             exit 1
           fi
 
           python -m compileall -q accounting
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: accounting/requirements.txt
+
+      - name: Install accounting dependencies
+        shell: bash
+        run: python -m pip install -r accounting/requirements.txt
+
+      - name: Run accounting tests
+        shell: bash
+        working-directory: accounting
+        run: python -m pytest -q
+
+      - name: Record successful validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          file_count="$(find accounting -type f | wc -l | tr -d '[:space:]')"
+          cat > migration/accounting-import.validation <<EOF
+          source_ref=${{ steps.source-ref.outputs.ref }}
+          compileall=passed
+          pytest=passed
+          imported_file_count=${file_count}
+          EOF
+
       - name: Commit imported accounting application
         shell: bash
         run: |
           set -euo pipefail
-          git add accounting
+          git add accounting migration/accounting-import.validation
           if git diff --cached --quiet; then
-            echo 'Accounting source is already synchronized.'
+            echo 'Accounting source is already synchronized and validated.'
             exit 0
           fi
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'chore: import accounting application'
+          git commit -m 'chore: import and validate accounting application'
           git push origin "HEAD:${GITHUB_REF_NAME}"
