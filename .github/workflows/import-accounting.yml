@@ -1,0 +1,123 @@
+name: Import accounting source
+
+on:
+  push:
+    branches:
+      - agent/import-accounting
+    paths:
+      - migration/accounting-source.ref
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-accounting-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  import-accounting:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read pinned source revision
+        id: source-ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="$(tr -d '[:space:]' < migration/accounting-source.ref)"
+          test -n "$ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          repository: Emad211/clinic_managment
+          ref: ${{ steps.source-ref.outputs.ref }}
+          path: _source
+          persist-credentials: false
+
+      - name: Import clean accounting source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf accounting
+          mkdir -p accounting
+
+          rsync -a --delete \
+            --exclude='build/' \
+            --exclude='dist/' \
+            --exclude='.venv/' \
+            --exclude='venv/' \
+            --exclude='__pycache__/' \
+            --exclude='.pytest_cache/' \
+            --exclude='.mypy_cache/' \
+            --exclude='.ruff_cache/' \
+            --exclude='instance/' \
+            --exclude='backups/' \
+            --exclude='*.pyc' \
+            --exclude='*.pyo' \
+            --exclude='*.db' \
+            --exclude='*.db-*' \
+            --exclude='*.sqlite' \
+            --exclude='*.sqlite3' \
+            --exclude='*.log' \
+            --exclude='.env' \
+            --exclude='.env.local' \
+            --exclude='.env.production' \
+            --exclude='.DS_Store' \
+            _source/webapp/ accounting/
+
+          cat > accounting/IMPORT_SOURCE.md <<EOF
+          # Accounting import provenance
+
+          This directory was imported from \`Emad211/clinic_managment:webapp/\`.
+
+          - Source revision: \`${{ steps.source-ref.outputs.ref }}\`
+          - Destination directory: \`accounting/\`
+          - Excluded: runtime databases, environment files, caches, logs, backups, and build artifacts.
+
+          Future changes should be made in this repository. Re-running the import intentionally replaces \`accounting/\` from the pinned source revision.
+          EOF
+
+          rm -rf _source
+
+      - name: Verify imported tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f accounting/start.py
+          test -f accounting/requirements.txt
+          test -f accounting/src/app.py
+          test -f accounting/src/adapters/sqlite/schema.sql
+          test -d accounting/tests
+
+          if find accounting -type f \( \
+              -name '*.db' -o -name '*.db-*' -o \
+              -name '*.sqlite' -o -name '*.sqlite3' -o \
+              -name '.env' -o -name '*.pyc' \
+            \) -print -quit | grep -q .; then
+            echo 'Forbidden runtime file found in accounting import.' >&2
+            exit 1
+          fi
+
+          python -m compileall -q accounting
+
+      - name: Commit imported accounting application
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add accounting
+          if git diff --cached --quiet; then
+            echo 'Accounting source is already synchronized.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: import accounting application'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
